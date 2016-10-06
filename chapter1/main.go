@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -13,65 +14,109 @@ import (
 //trade watches, they need a way to inform the watchtower of who is currently on watch
 func main() {
 	rand.Seed(time.Now().UnixNano())
-	dragon := &Dragon{HP: 3, dead: make(chan struct{})}
+
+	events := make(EventChannel)
+	quit := make(chan struct{})
+
+	dragon := &Dragon{HP: 3}
 	castle := NewCastle(4)
 
-	castle.AssignGuards()
+	go func(quit chan struct{}) {
+		for {
+			event := <-events
+			switch event := event.(type) {
+			case GuardOnWatchEvent:
+				log.Printf("Guard %v on duty", event)
+			case GuardOffDutyEvent:
+				log.Printf("Guard %v off duty", event)
+			case CastleUnderAttackEvent:
+				log.Println("A dragon attacks your castle")
+			case GuardAttacksEvent:
+				log.Println("A guard attacks the dragon")
+			case DragonDamagedEvent:
+				log.Printf("Dragon damaged. Hp left: %v", event.HP)
+			case CastleDestroyedEvent:
+				log.Println("The dragon destroyed your castle")
+				close(quit)
+				break
+			case DragonDeadEvent:
+				log.Println("Your guards defeated the dragon")
+				close(quit)
+				break
+			}
+		}
+	}(quit)
 
-	log.Println("A dragon attacks your castle")
-	dragon.Approach(castle)
+	castle.AssignGuards(events)
 
-	select {
-	case <-castle.Destroyed():
-		log.Println("The dragon destroyed your castle")
-	case <-dragon.Dead():
-		log.Println("Your guards defeated the dragon")
-	}
+	dragon.Approach(castle, events)
+
+	<-quit
 }
 
+type GuardOnWatchEvent int
+type GuardOffDutyEvent int
+type CastleUnderAttackEvent struct{}
+type CastleDestroyedEvent struct{}
+type DragonDeadEvent struct{}
+type GuardAttacksEvent struct{}
+type DragonDamagedEvent struct {
+	HP int
+}
+
+type EventChannel chan interface{}
+
 type Danger interface {
-	TakeDamage()
+	TakeDamage(EventChannel)
 }
 
 type Adversary interface {
-	Spot(Danger)
-	Destroy()
+	Spot(Danger, EventChannel)
+	Destroy(EventChannel)
 }
 
 type Dragon struct {
-	HP   int
-	dead chan struct{}
+	sync.RWMutex
+	HP int
 }
 
-func (dragon *Dragon) TakeDamage() {
-	dragon.HP--
-	log.Printf("Dragon damaged. Hp left: %v", dragon.HP)
+func (dragon *Dragon) TakeDamage(events EventChannel) {
+	dragon.Lock()
+	defer dragon.Unlock()
 
-	if !dragon.IsAlive() && dragon.dead != nil {
-		close(dragon.dead)
+	dragon.HP--
+	events <- DragonDamagedEvent{HP: dragon.HP}
+
+	if !dragon.isAlive() {
+		events <- DragonDeadEvent{}
 	}
 }
 
-func (dragon *Dragon) IsAlive() bool {
+//This function assumes the caller already locked
+//the mutex on dragon for reading (or writing)
+func (dragon *Dragon) isAlive() bool {
 	return dragon.HP > 0
 }
 
-func (dragon *Dragon) Dead() chan struct{} {
-	return dragon.dead
+func (dragon *Dragon) IsAlive() bool {
+	dragon.RLock()
+	defer dragon.RUnlock()
+
+	return dragon.isAlive()
 }
 
-func (dragon *Dragon) Approach(adversary Adversary) {
-	adversary.Spot(dragon)
+func (dragon *Dragon) Approach(adversary Adversary, events EventChannel) {
+	adversary.Spot(dragon, events)
 
-	go func() {
+	go func(events EventChannel) {
 		<-time.After(2 * time.Second)
-		adversary.Destroy()
-	}()
+		adversary.Destroy(events)
+	}(events)
 }
 
 func NewCastle(nGuards int) *Castle {
 	castle := &Castle{
-		Watchtower: Watchtower{Horn: make(chan Danger), guards: nGuards},
+		Watchtower: Watchtower{Horn: make(chan Danger), guards: nGuards - 1},
 		destroyed:  make(chan struct{}),
 	}
 
@@ -89,26 +134,22 @@ type Castle struct {
 	destroyed chan struct{}
 }
 
-func (castle Castle) AssignGuards() {
-	offDuty := rand.Intn(4)
+func (castle *Castle) AssignGuards(events EventChannel) {
+	offDuty := rand.Intn(len(castle.Guards))
 
 	for i, guard := range castle.Guards {
 		if i == offDuty {
-			log.Printf("Guard %v off duty", i)
+			events <- GuardOffDutyEvent(i)
 			guard.OffDuty()
 		} else {
-			log.Printf("Guard %v on watch", i)
-			guard.AssignWatch(castle.Watchtower.Horn)
+			events <- GuardOnWatchEvent(i)
+			guard.StandWatch(castle.Watchtower.Horn, events)
 		}
 	}
 }
 
-func (castle Castle) Destroy() {
-	close(castle.destroyed)
-}
-
-func (castle Castle) Destroyed() chan struct{} {
-	return castle.destroyed
+func (castle *Castle) Destroy(events EventChannel) {
+	events <- CastleDestroyedEvent{}
 }
 
 func NewGuard() *Guard {
@@ -119,13 +160,12 @@ type Guard struct {
 	watchDone chan struct{}
 }
 
-func (guard Guard) AssignWatch(Horn chan Danger) {
+func (guard Guard) StandWatch(Horn chan Danger, events EventChannel) {
 	go func() {
 		for {
-			log.Println("Listening for danger")
 			select {
 			case danger := <-Horn:
-				guard.Attack(danger)
+				guard.Attack(danger, events)
 			case <-guard.watchDone:
 				return
 			}
@@ -138,9 +178,9 @@ func (guard Guard) OffDuty() {
 	guard.watchDone = make(chan struct{})
 }
 
-func (guard Guard) Attack(danger Danger) {
-	log.Println("Attacking")
-	danger.TakeDamage()
+func (guard Guard) Attack(danger Danger, events EventChannel) {
+	events <- GuardAttacksEvent{}
+	danger.TakeDamage(events)
 }
 
 type Watchtower struct {
@@ -148,7 +188,9 @@ type Watchtower struct {
 	guards int
 }
 
-func (watchtower Watchtower) Spot(danger Danger) {
+func (watchtower Watchtower) Spot(danger Danger, events EventChannel) {
+	events <- CastleUnderAttackEvent{}
+
 	for i := 0; i < watchtower.guards; i++ {
 		watchtower.Horn <- danger
 	}
