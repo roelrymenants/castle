@@ -34,8 +34,7 @@ func main() {
 }
 
 type Danger interface {
-	Damaged()
-	Dead() chan struct{}
+	TakeDamage()
 }
 
 type Dragon struct {
@@ -43,7 +42,7 @@ type Dragon struct {
 	dead chan struct{}
 }
 
-func (dragon *Dragon) Damaged() {
+func (dragon *Dragon) TakeDamage() {
 	dragon.HP--
 	log.Printf("Dragon damaged. Hp left: %v", dragon.HP)
 
@@ -121,7 +120,7 @@ func (guard Guard) OffDuty() {
 
 func (guard Guard) Attack(danger Danger) {
 	log.Println("Attacking")
-	danger.Damaged()
+	danger.TakeDamage()
 }
 
 type Watchtower struct {
