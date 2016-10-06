@@ -13,7 +13,7 @@ import (
 //trade watches, they need a way to inform the watchtower of who is currently on watch
 func main() {
 	rand.Seed(time.Now().UnixNano())
-	dragon := &Dragon{HP: 3, clarion: make(chan struct{})}
+	dragon := &Dragon{HP: 3, dead: make(chan struct{})}
 	castle := NewCastle(4)
 
 	castle.AssignGuards()
@@ -39,16 +39,16 @@ type Danger interface {
 }
 
 type Dragon struct {
-	HP      int
-	clarion chan struct{}
+	HP   int
+	dead chan struct{}
 }
 
 func (dragon *Dragon) Damaged() {
 	dragon.HP--
 	log.Printf("Dragon damaged. Hp left: %v", dragon.HP)
 
-	if !dragon.IsAlive() && dragon.clarion != nil {
-		close(dragon.clarion)
+	if !dragon.IsAlive() && dragon.dead != nil {
+		close(dragon.dead)
 	}
 }
 
@@ -57,7 +57,7 @@ func (dragon *Dragon) IsAlive() bool {
 }
 
 func (dragon *Dragon) Dead() chan struct{} {
-	return dragon.clarion
+	return dragon.dead
 }
 
 func NewCastle(nGuards int) *Castle {
