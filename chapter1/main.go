@@ -19,22 +19,23 @@ func main() {
 	castle.AssignGuards()
 
 	log.Println("A dragon attacks your castle")
-	castle.Watchtower.Spot(dragon)
+	dragon.Approach(castle)
 
 	select {
-	case <-time.After(1 * time.Second):
-	case <-dragon.Dead():
-	}
-
-	if dragon.IsAlive() {
+	case <-castle.Destroyed():
 		log.Println("The dragon destroyed your castle")
-	} else {
+	case <-dragon.Dead():
 		log.Println("Your guards defeated the dragon")
 	}
 }
 
 type Danger interface {
 	TakeDamage()
+}
+
+type Adversary interface {
+	Spot(Danger)
+	Destroy()
 }
 
 type Dragon struct {
@@ -59,9 +60,19 @@ func (dragon *Dragon) Dead() chan struct{} {
 	return dragon.dead
 }
 
+func (dragon *Dragon) Approach(adversary Adversary) {
+	adversary.Spot(dragon)
+
+	go func() {
+		<-time.After(2 * time.Second)
+		adversary.Destroy()
+	}()
+}
+
 func NewCastle(nGuards int) *Castle {
 	castle := &Castle{
 		Watchtower: Watchtower{Horn: make(chan Danger), guards: nGuards},
+		destroyed:  make(chan struct{}),
 	}
 
 	for i := 0; i < nGuards; i++ {
@@ -73,8 +84,9 @@ func NewCastle(nGuards int) *Castle {
 }
 
 type Castle struct {
-	Guards     []Guard
-	Watchtower Watchtower
+	Guards []Guard
+	Watchtower
+	destroyed chan struct{}
 }
 
 func (castle Castle) AssignGuards() {
@@ -89,6 +101,14 @@ func (castle Castle) AssignGuards() {
 			guard.AssignWatch(castle.Watchtower.Horn)
 		}
 	}
+}
+
+func (castle Castle) Destroy() {
+	close(castle.destroyed)
+}
+
+func (castle Castle) Destroyed() chan struct{} {
+	return castle.destroyed
 }
 
 func NewGuard() *Guard {
